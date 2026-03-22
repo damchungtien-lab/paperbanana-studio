@@ -73,6 +73,10 @@ class StylistAgent(BaseAgent):
         user_prompt += f"{cfg['context_labels'][1]}: {data['visual_intent']}\nYour Output:"
         
         content_list = [{"type": "text", "text": user_prompt}]
+        data.setdefault("_trace", {})["stylist"] = {
+            "prompt": user_prompt,
+            "model_name": self.model_name,
+        }
 
         # Generate response
         response_list = await generation_utils.call_model_with_retry_async(

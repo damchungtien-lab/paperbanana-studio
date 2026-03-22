@@ -164,39 +164,25 @@ class PolishAgent(BaseAgent):
         # Generate polished image
         aspect_ratio = data.get("additional_info", {}).get("rounded_ratio", "16:9")
         try:
-            if generation_utils.openrouter_client is not None:
-                image_config = {
-                    "system_prompt": self.system_prompt,
-                    "temperature": self.exp_config.temperature,
-                    "aspect_ratio": aspect_ratio,
-                    "image_size": "1k",
-                }
-                response_list = await generation_utils.call_openrouter_image_generation_with_retry_async(
-                    model_name=self.image_gen_model_name,
-                    contents=content_list,
-                    config=image_config,
-                    max_attempts=5,
-                    retry_delay=30,
-                )
-            else:
-                response_list = await generation_utils.call_gemini_with_retry_async(
-                    model_name=self.image_gen_model_name,
-                    contents=content_list,
-                    config=types.GenerateContentConfig(
-                        system_instruction=self.system_prompt,
-                        temperature=self.exp_config.temperature,
-                        candidate_count=1,
-                        max_output_tokens=50000,
-                        response_modalities=["IMAGE"],
-                        image_config=types.ImageConfig(
-                            aspect_ratio=aspect_ratio,
-                            image_size="1k",
-                        ),
-                    ),
-                    max_attempts=5,
-                    retry_delay=30,
-                )
-            
+            image_config = {
+                "system_prompt": self.system_prompt,
+                "temperature": self.exp_config.temperature,
+                "aspect_ratio": aspect_ratio,
+                "image_size": "1K",
+                "size": "1536x1024",
+                "quality": "high",
+                "background": "opaque",
+                "output_format": "png",
+            }
+            response_list = await generation_utils.call_image_model_with_retry_async(
+                model_name=self.image_gen_model_name,
+                prompt=user_prompt,
+                contents=content_list,
+                config=image_config,
+                max_attempts=5,
+                retry_delay=30,
+            )
+             
             if response_list and response_list[0]:
                 # Convert PNG to JPG
                 converted_jpg = image_utils.convert_png_b64_to_jpg_b64(response_list[0])

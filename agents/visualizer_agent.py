@@ -27,6 +27,11 @@ from utils import generation_utils, image_utils
 from .base_agent import BaseAgent
 
 
+def _resolve_figure_language(additional_info: Dict[str, Any]) -> str:
+    figure_language = str((additional_info or {}).get("figure_language", "en")).strip().lower()
+    return "zh" if figure_language in {"zh", "chinese", "中文"} else "en"
+
+
 def _execute_plot_code_worker(code_text: str) -> str:
     """
     Independent plot code execution worker:
@@ -139,7 +144,15 @@ class VisualizerAgent(BaseAgent):
             loop = asyncio.get_running_loop()
         
         for desc_key in desc_keys_to_process:
+            additional_info = data.get("additional_info", {})
+            figure_language = _resolve_figure_language(additional_info)
             prompt_text = cfg["prompt_template"].format(desc=data[desc_key])
+            if cfg["task_name"] == "diagram":
+                language_text = "Chinese" if figure_language == "zh" else "English"
+                prompt_text += (
+                    f"\nAll labels, annotations, and any text rendered inside the figure "
+                    f"must be in {language_text}. Do not mix languages."
+                )
             content_list = [{"type": "text", "text": prompt_text}]
             
             gen_config_args = {
@@ -151,53 +164,38 @@ class VisualizerAgent(BaseAgent):
             
             # Resolve aspect ratio for image generation
             aspect_ratio = "1:1"
-            if "additional_info" in data and "rounded_ratio" in data["additional_info"]:
-                aspect_ratio = data["additional_info"]["rounded_ratio"]
+            image_size = "1K"
+            if "rounded_ratio" in additional_info:
+                aspect_ratio = additional_info["rounded_ratio"]
+            if "image_size" in additional_info:
+                image_size = generation_utils.normalize_generation_image_size(
+                    additional_info["image_size"]
+                )
+            data.setdefault("_trace", {}).setdefault("visualizer", {})[desc_key] = {
+                "prompt": prompt_text,
+                "aspect_ratio": aspect_ratio,
+                "image_size": image_size,
+                "model_name": self.model_name,
+            }
 
             if cfg["use_image_generation"]:
-                if "gpt-image" in self.model_name:
-                    image_config = {
-                        "size": "1536x1024",
-                        "quality": "high",
-                        "background": "opaque",
-                        "output_format": "png",
-                    }
-                    response_list = await generation_utils.call_openai_image_generation_with_retry_async(
-                        model_name=self.model_name,
-                        prompt=prompt_text,
-                        config=image_config,
-                        max_attempts=5,
-                        retry_delay=30,
-                    )
-                elif generation_utils.openrouter_client is not None:
-                    # OpenRouter image generation
-                    image_config = {
-                        "system_prompt": self.system_prompt,
-                        "temperature": self.exp_config.temperature,
-                        "aspect_ratio": aspect_ratio,
-                        "image_size": "1k",
-                    }
-                    response_list = await generation_utils.call_openrouter_image_generation_with_retry_async(
-                        model_name=self.model_name,
-                        contents=content_list,
-                        config=image_config,
-                        max_attempts=5,
-                        retry_delay=30,
-                    )
-                else:
-                    # Gemini direct image generation
-                    gen_config_args["response_modalities"] = ["IMAGE"]
-                    gen_config_args["image_config"] = types.ImageConfig(
-                        aspect_ratio=aspect_ratio,
-                        image_size="1k",
-                    )
-                    response_list = await generation_utils.call_gemini_with_retry_async(
-                        model_name=self.model_name,
-                        contents=content_list,
-                        config=types.GenerateContentConfig(**gen_config_args),
-                        max_attempts=5,
-                        retry_delay=30,
-                    )
+                image_config = {
+                    "system_prompt": self.system_prompt,
+                    "temperature": self.exp_config.temperature,
+                    "aspect_ratio": aspect_ratio,
+                    "image_size": image_size,
+                    "quality": "high",
+                    "background": "opaque",
+                    "output_format": "png",
+                }
+                response_list = await generation_utils.call_image_model_with_retry_async(
+                    model_name=self.model_name,
+                    prompt=prompt_text,
+                    contents=content_list,
+                    config=image_config,
+                    max_attempts=5,
+                    retry_delay=30,
+                )
             else:
                 # Code generation for plots — use the unified router
                 response_list = await generation_utils.call_model_with_retry_async(
@@ -220,7 +218,7 @@ class VisualizerAgent(BaseAgent):
                 if converted_jpg:
                     data[f"{desc_key}_base64_jpg"] = converted_jpg
                 else:
-                    print(f"⚠️  Skipping {desc_key}: image conversion failed")
+                    print(f"Warning: Skipping {desc_key}: image conversion failed")
             else:
                 # Plot: execute generated code
                 raw_code = response_list[0]
@@ -240,7 +238,7 @@ class VisualizerAgent(BaseAgent):
         return data
 
 
-DIAGRAM_VISUALIZER_AGENT_SYSTEM_PROMPT = """You are an expert scientific diagram illustrator. Generate high-quality scientific diagrams based on user requests."""
+DIAGRAM_VISUALIZER_AGENT_SYSTEM_PROMPT = """You are an expert scientific diagram illustrator. Generate high-quality scientific diagrams based on user requests. If the request specifies a target language for in-figure text, follow it exactly."""
 
 PLOT_VISUALIZER_AGENT_SYSTEM_PROMPT = """You are an expert statistical plot illustrator. Write code to generate high-quality statistical plots based on user requests."""
 

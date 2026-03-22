@@ -60,6 +60,9 @@ class PlannerAgent(BaseAgent):
         raw_content = data["content"]
         content = json.dumps(raw_content) if isinstance(raw_content, (dict, list)) else raw_content
         description = data["visual_intent"]
+        additional_info = data.get("additional_info", {})
+        figure_language = str(additional_info.get("figure_language", "en")).strip().lower()
+        language_text = "Chinese" if figure_language in {"zh", "chinese", "中文"} else "English"
 
         content_list = []
         
@@ -67,10 +70,7 @@ class PlannerAgent(BaseAgent):
         examples = data.get("retrieved_examples", [])
         if not examples:
             retrieved_ids = data.get("top10_references", [])
-            with open(self.exp_config.work_dir / f"data/PaperBananaBench/{cfg['task_name']}/ref.json", "r", encoding="utf-8") as f:
-                candidate_pool = json.load(f)
-            id_to_item = {item["id"]: item for item in candidate_pool}
-            examples = [id_to_item[ref_id] for ref_id in retrieved_ids if ref_id in id_to_item]
+            examples = self._load_examples_from_reference_pool(cfg["task_name"], retrieved_ids)
         
         user_prompt = ""
         for idx, item in enumerate(examples):
@@ -86,19 +86,44 @@ class PlannerAgent(BaseAgent):
             
             # Resolve relative path using work_dir
             image_path = self.exp_config.work_dir / f"data/PaperBananaBench/{cfg['task_name']}" / item["path_to_gt_image"]
-            with open(image_path, "rb") as f:
-                ref_image_base64 = base64.b64encode(f.read()).decode("utf-8")
-            content_list.append({"type": "image", "image_base64": ref_image_base64})
+            if image_path.exists():
+                with open(image_path, "rb") as f:
+                    ref_image_base64 = base64.b64encode(f.read()).decode("utf-8")
+                content_list.append({"type": "image", "image_base64": ref_image_base64})
+            else:
+                print(f"Warning: Reference image not found at {image_path}. Skipping this example image.")
             user_prompt = ""
+
+        if not examples:
+            content_list.append(
+                {
+                    "type": "text",
+                    "text": (
+                        "No local reference examples are available for this request. "
+                        "Please infer the best possible detailed figure description directly from the provided input."
+                    ),
+                }
+            )
 
         user_prompt += f"Now, based on the following {cfg['content_label'].lower()} and {cfg['visual_intent_label'].lower()}, provide a detailed description for the figure to be generated.\n"
         user_prompt += f"{cfg['content_label']}: {content}\n{cfg['visual_intent_label']}: {description}\n"
+        if cfg["task_name"] == "diagram":
+            user_prompt += (
+                f"All labels, annotations, and any text that should appear inside the figure must be in {language_text}. "
+                "Do not mix languages.\n"
+            )
         user_prompt += "Detailed description of the target figure to be generated"
         if cfg["task_name"] == "diagram":
             user_prompt += " (do not include figure titles)"
         user_prompt += ":"
 
         content_list.append({"type": "text", "text": user_prompt})
+        data.setdefault("_trace", {})["planner"] = {
+            "prompt": user_prompt,
+            "reference_count": len(examples),
+            "language": language_text,
+            "model_name": self.model_name,
+        }
 
         response_list = await generation_utils.call_model_with_retry_async(
             model_name=self.model_name,
@@ -118,6 +143,22 @@ class PlannerAgent(BaseAgent):
 
         return data
 
+    def _load_examples_from_reference_pool(self, task_name: str, retrieved_ids: list[str]) -> list[dict[str, Any]]:
+        """Load retrieved examples from the local reference pool if available."""
+        if not retrieved_ids:
+            return []
+
+        ref_path = self.exp_config.work_dir / f"data/PaperBananaBench/{task_name}/ref.json"
+        if not ref_path.exists():
+            print(f"Warning: Reference pool not found at {ref_path}. Continuing without local few-shot examples.")
+            return []
+
+        with open(ref_path, "r", encoding="utf-8") as f:
+            candidate_pool = json.load(f)
+
+        id_to_item = {item["id"]: item for item in candidate_pool}
+        return [id_to_item[ref_id] for ref_id in retrieved_ids if ref_id in id_to_item]
+
 
 
 
@@ -128,6 +169,7 @@ To help you understand the task better, and grasp the principles for generating 
 
 ** IMPORTANT: **
 Your description should be as detailed as possible. Semantically, clearly describe each element and their connections. Formally, include various details such as background style (typically pure white or very light pastel), colors, line thickness, icon styles, etc. Remember: vague or unclear specifications will only make the generated figure worse, not better.
+If the request specifies a target language for in-figure text, preserve that language throughout the entire figure description.
 """
 
 PLOT_PLANNER_AGENT_SYSTEM_PROMPT = """

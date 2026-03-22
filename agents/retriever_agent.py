@@ -72,6 +72,14 @@ class RetrieverAgent(BaseAgent):
             data: Updated data dictionary with 'top10_references' as List[str]
         """
         cfg = self.task_config
+        requested_retrieval_setting = retrieval_setting
+        trace_payload = {
+            "requested_setting": requested_retrieval_setting,
+            "effective_setting": retrieval_setting,
+            "prompt": "",
+            "raw_response": "",
+            "selected_ids": [],
+        }
         
         # Check if reference file exists to gracefully fallback if dataset isn't downloaded
         import os
@@ -86,6 +94,7 @@ class RetrieverAgent(BaseAgent):
             if not manual_file.exists():
                 print(f"Warning: Manual reference file not found at {manual_file}. Falling back to retrieval_setting='none'.")
                 retrieval_setting = "none"
+        trace_payload["effective_setting"] = retrieval_setting
         
         if retrieval_setting == "none":
             # No retrieval, return empty list
@@ -105,11 +114,13 @@ class RetrieverAgent(BaseAgent):
             
         elif retrieval_setting == "auto":
             # Call model to retrieve and parse results
-            data["top10_references"] = await self._retrieve_and_parse(data, cfg)
+            data["top10_references"], auto_trace = await self._retrieve_and_parse(data, cfg)
             data["retrieved_examples"] = []  # Planner will load from ref.json
+            trace_payload.update(auto_trace)
         else:
             raise ValueError(f"Unknown retrieval_setting: {retrieval_setting}")
-        
+        trace_payload["selected_ids"] = data.get("top10_references", [])
+        data.setdefault("_trace", {})["retriever"] = trace_payload
         return data
     
     def _load_manual_references(self, cfg: dict) -> tuple:
@@ -138,7 +149,7 @@ class RetrieverAgent(BaseAgent):
         sample_size = min(10, len(id_list))
         return random.sample(id_list, sample_size) if sample_size > 0 else []
     
-    async def _retrieve_and_parse(self, data: Dict[str, Any], cfg: dict) -> list:
+    async def _retrieve_and_parse(self, data: Dict[str, Any], cfg: dict) -> tuple[list, dict[str, Any]]:
         """Call retrieval model and parse results"""
         content = str(data["content"])
         visual_intent = data["visual_intent"]
@@ -174,7 +185,11 @@ class RetrieverAgent(BaseAgent):
         
         # Parse the retrieval result (migrated from get_references.py)
         raw_response = response_list[0].strip()
-        return self._parse_retrieval_result(raw_response, cfg["task_name"])
+        return self._parse_retrieval_result(raw_response, cfg["task_name"]), {
+            "prompt": user_prompt,
+            "raw_response": raw_response,
+            "effective_setting": "auto",
+        }
     
     def _parse_retrieval_result(self, raw_response: str, task_name: str) -> list:
         """

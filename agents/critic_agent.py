@@ -102,16 +102,26 @@ class CriticAgent(BaseAgent):
                 },
             })
         else:
-            print(f"⚠️ [Critic] No valid image found for round {round_idx}. Using text-only critique mode.")
+            print(f"Warning: [Critic] No valid image found for round {round_idx}. Using text-only critique mode.")
             content_list.append({
                 "type": "text", 
                 "text": "\n[SYSTEM NOTICE] The plot image could not be generated based on the current description (likely due to invalid code). Please check the description for errors (e.g., syntax issues, missing data) and provide a revised version."
             })
 
+        prompt_text = (
+            f"Detailed Description: {detailed_description}\n"
+            f"{cfg['context_labels'][0]}: {content}\n"
+            f"{cfg['context_labels'][1]}: {visual_intent}\nYour Output:"
+        )
         content_list.append({
             "type": "text",
-            "text": f"Detailed Description: {detailed_description}\n{cfg['context_labels'][0]}: {content}\n{cfg['context_labels'][1]}: {visual_intent}\nYour Output:",
+            "text": prompt_text,
         })
+        data.setdefault("_trace", {}).setdefault("critic", {})[str(round_idx)] = {
+            "prompt": prompt_text,
+            "model_name": self.model_name,
+            "source": source,
+        }
 
         response_list = await generation_utils.call_model_with_retry_async(
             model_name=self.model_name,

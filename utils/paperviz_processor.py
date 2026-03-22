@@ -17,6 +17,7 @@ Processing pipeline of PaperVizAgent
 """
 
 import asyncio
+import inspect
 from typing import List, Dict, Any, AsyncGenerator
 
 import numpy as np
@@ -47,6 +48,7 @@ class PaperVizProcessor:
         critic_agent: CriticAgent,
         retriever_agent: RetrieverAgent,
         polish_agent: PolishAgent,
+        event_callback=None,
     ):
         self.exp_config = exp_config
         self.vanilla_agent = vanilla_agent
@@ -56,6 +58,116 @@ class PaperVizProcessor:
         self.critic_agent = critic_agent
         self.retriever_agent = retriever_agent
         self.polish_agent = polish_agent
+        self.event_callback = event_callback
+
+    async def _emit_event(self, event: Dict[str, Any], data: Dict[str, Any] | None = None):
+        """Emit a task-progress event if the caller provided a callback."""
+        if self.event_callback is None:
+            return
+        maybe_awaitable = self.event_callback(event, data)
+        if inspect.isawaitable(maybe_awaitable):
+            await maybe_awaitable
+
+    async def _emit_text_stage(
+        self,
+        data: Dict[str, Any],
+        stage: str,
+        label: str,
+        desc_key: str = "",
+        suggestions_key: str = "",
+        prompt: str = "",
+        message: str = "",
+        references: list[str] | None = None,
+    ):
+        await self._emit_event(
+            {
+                "type": "stage_complete",
+                "candidate_id": data.get("candidate_id"),
+                "stage": stage,
+                "label": label,
+                "message": message,
+                "desc_key": desc_key,
+                "suggestions_key": suggestions_key,
+                "prompt": prompt,
+                "references": references or [],
+            },
+            data,
+        )
+
+    async def _emit_image_stage(
+        self,
+        data: Dict[str, Any],
+        stage: str,
+        label: str,
+        image_key: str,
+        prompt: str = "",
+        desc_key: str = "",
+        message: str = "",
+    ):
+        await self._emit_event(
+            {
+                "type": "stage_complete",
+                "candidate_id": data.get("candidate_id"),
+                "stage": stage,
+                "label": label,
+                "message": message,
+                "image_key": image_key,
+                "desc_key": desc_key,
+                "prompt": prompt,
+            },
+            data,
+        )
+
+    async def _emit_visualizer_stage_events(
+        self,
+        data: Dict[str, Any],
+        task_name: str,
+        include_stylist: bool = False,
+        critic_round: int | None = None,
+    ):
+        visualizer_trace = data.get("_trace", {}).get("visualizer", {})
+        if critic_round is not None:
+            desc_key = f"target_{task_name}_critic_desc{critic_round}"
+            image_key = f"{desc_key}_base64_jpg"
+            if data.get(image_key):
+                prompt = visualizer_trace.get(desc_key, {}).get("prompt", "")
+                await self._emit_image_stage(
+                    data,
+                    stage=f"critic_render_{critic_round}",
+                    label=f"Critic Render {critic_round}",
+                    image_key=image_key,
+                    desc_key=desc_key,
+                    prompt=prompt,
+                    message=f"Rendered critic round {critic_round} image.",
+                )
+            return
+
+        planner_desc_key = f"target_{task_name}_desc0"
+        planner_image_key = f"{planner_desc_key}_base64_jpg"
+        if data.get(planner_image_key):
+            await self._emit_image_stage(
+                data,
+                stage="planner_render",
+                label="Planner Render",
+                image_key=planner_image_key,
+                desc_key=planner_desc_key,
+                prompt=visualizer_trace.get(planner_desc_key, {}).get("prompt", ""),
+                message="Rendered the planner description into an image.",
+            )
+
+        if include_stylist:
+            stylist_desc_key = f"target_{task_name}_stylist_desc0"
+            stylist_image_key = f"{stylist_desc_key}_base64_jpg"
+            if data.get(stylist_image_key):
+                await self._emit_image_stage(
+                    data,
+                    stage="stylist_render",
+                    label="Stylist Render",
+                    image_key=stylist_image_key,
+                    desc_key=stylist_desc_key,
+                    prompt=visualizer_trace.get(stylist_desc_key, {}).get("prompt", ""),
+                    message="Rendered the stylist-refined description into an image.",
+                )
 
     async def _run_critic_iterations(self, data: Dict[str, Any], task_name: str, max_rounds: int = 3, source: str = "stylist") -> Dict[str, Any]:
         """
@@ -77,15 +189,41 @@ class PaperVizProcessor:
         for round_idx in range(max_rounds):
             data["current_critic_round"] = round_idx
             data = await self.critic_agent.process(data, source=source)
+            critic_trace = data.get("_trace", {}).get("critic", {}).get(str(round_idx), {})
+            await self._emit_text_stage(
+                data,
+                stage=f"critic_review_{round_idx}",
+                label=f"Critic Round {round_idx}",
+                desc_key=f"target_{task_name}_critic_desc{round_idx}",
+                suggestions_key=f"target_{task_name}_critic_suggestions{round_idx}",
+                prompt=critic_trace.get("prompt", ""),
+                message=f"Completed critique for round {round_idx}.",
+            )
             
             critic_suggestions_key = f"target_{task_name}_critic_suggestions{round_idx}"
             critic_suggestions = data.get(critic_suggestions_key, "")
             
             if critic_suggestions.strip() == "No changes needed.":
                 print(f"[Critic Round {round_idx}] No changes needed. Stopping iteration.")
+                await self._emit_event(
+                    {
+                        "type": "stage_complete",
+                        "candidate_id": data.get("candidate_id"),
+                        "stage": f"critic_stop_{round_idx}",
+                        "label": f"Critic Stop {round_idx}",
+                        "message": f"Critic round {round_idx} reported no further changes needed.",
+                        "suggestions_key": critic_suggestions_key,
+                    },
+                    data,
+                )
                 break
             
             data = await self.visualizer_agent.process(data)
+            await self._emit_visualizer_stage_events(
+                data,
+                task_name=task_name,
+                critic_round=round_idx,
+            )
             
             # Check if visualization validation succeeded
             new_image_key = f"target_{task_name}_critic_desc{round_idx}_base64_jpg"
@@ -116,27 +254,102 @@ class PaperVizProcessor:
         if exp_mode == "vanilla":
             data = await self.vanilla_agent.process(data)
             data["eval_image_field"] = f"vanilla_{task_name}_base64_jpg"
+            vanilla_trace = data.get("_trace", {}).get("vanilla", {})
+            await self._emit_image_stage(
+                data,
+                stage="vanilla",
+                label="Vanilla",
+                image_key=data["eval_image_field"],
+                prompt=vanilla_trace.get("prompt", ""),
+                message="Generated a candidate directly with the vanilla pipeline.",
+            )
 
         elif exp_mode == "dev_planner":
             if not already_retrieved:
                 data = await self.retriever_agent.process(data, retrieval_setting=retrieval_setting)
+                retriever_trace = data.get("_trace", {}).get("retriever", {})
+                await self._emit_text_stage(
+                    data,
+                    stage="retriever",
+                    label="Retriever",
+                    prompt=retriever_trace.get("prompt", ""),
+                    message=f"Selected {len(data.get('top10_references', []))} references.",
+                    references=data.get("top10_references", []),
+                )
             data = await self.planner_agent.process(data)
+            planner_trace = data.get("_trace", {}).get("planner", {})
+            await self._emit_text_stage(
+                data,
+                stage="planner",
+                label="Planner",
+                desc_key=f"target_{task_name}_desc0",
+                prompt=planner_trace.get("prompt", ""),
+                message="Generated the initial figure description.",
+            )
             data = await self.visualizer_agent.process(data)
+            await self._emit_visualizer_stage_events(data, task_name=task_name)
             data["eval_image_field"] = f"target_{task_name}_desc0_base64_jpg"
 
         elif exp_mode == "dev_planner_stylist":
             if not already_retrieved:
                 data = await self.retriever_agent.process(data, retrieval_setting=retrieval_setting)
+                retriever_trace = data.get("_trace", {}).get("retriever", {})
+                await self._emit_text_stage(
+                    data,
+                    stage="retriever",
+                    label="Retriever",
+                    prompt=retriever_trace.get("prompt", ""),
+                    message=f"Selected {len(data.get('top10_references', []))} references.",
+                    references=data.get("top10_references", []),
+                )
             data = await self.planner_agent.process(data)
+            planner_trace = data.get("_trace", {}).get("planner", {})
+            await self._emit_text_stage(
+                data,
+                stage="planner",
+                label="Planner",
+                desc_key=f"target_{task_name}_desc0",
+                prompt=planner_trace.get("prompt", ""),
+                message="Generated the initial figure description.",
+            )
             data = await self.stylist_agent.process(data)
+            stylist_trace = data.get("_trace", {}).get("stylist", {})
+            await self._emit_text_stage(
+                data,
+                stage="stylist",
+                label="Stylist",
+                desc_key=f"target_{task_name}_stylist_desc0",
+                prompt=stylist_trace.get("prompt", ""),
+                message="Refined the description with style guidance.",
+            )
             data = await self.visualizer_agent.process(data)
+            await self._emit_visualizer_stage_events(data, task_name=task_name, include_stylist=True)
             data["eval_image_field"] = f"target_{task_name}_stylist_desc0_base64_jpg"
 
         elif exp_mode in ["dev_planner_critic", "demo_planner_critic"]:
             if not already_retrieved:
                 data = await self.retriever_agent.process(data, retrieval_setting=retrieval_setting)
+                retriever_trace = data.get("_trace", {}).get("retriever", {})
+                await self._emit_text_stage(
+                    data,
+                    stage="retriever",
+                    label="Retriever",
+                    prompt=retriever_trace.get("prompt", ""),
+                    message=f"Selected {len(data.get('top10_references', []))} references.",
+                    references=data.get("top10_references", []),
+                )
             data = await self.planner_agent.process(data)
+            planner_trace = data.get("_trace", {}).get("planner", {})
+            await self._emit_text_stage(
+                data,
+                stage="planner",
+                label="Planner",
+                desc_key=f"target_{task_name}_desc0",
+                prompt=planner_trace.get("prompt", ""),
+                message="Generated the initial figure description.",
+            )
             data = await self.visualizer_agent.process(data)
+            await self._emit_visualizer_stage_events(data, task_name=task_name)
             # Use max_critic_rounds from data if available, otherwise default to 3
             max_rounds = data.get("max_critic_rounds", 3)
             data = await self._run_critic_iterations(data, task_name, max_rounds=max_rounds, source="planner")
@@ -145,9 +358,37 @@ class PaperVizProcessor:
         elif exp_mode in ["dev_full", "demo_full"]:
             if not already_retrieved:
                 data = await self.retriever_agent.process(data, retrieval_setting=retrieval_setting)
+                retriever_trace = data.get("_trace", {}).get("retriever", {})
+                await self._emit_text_stage(
+                    data,
+                    stage="retriever",
+                    label="Retriever",
+                    prompt=retriever_trace.get("prompt", ""),
+                    message=f"Selected {len(data.get('top10_references', []))} references.",
+                    references=data.get("top10_references", []),
+                )
             data = await self.planner_agent.process(data)
+            planner_trace = data.get("_trace", {}).get("planner", {})
+            await self._emit_text_stage(
+                data,
+                stage="planner",
+                label="Planner",
+                desc_key=f"target_{task_name}_desc0",
+                prompt=planner_trace.get("prompt", ""),
+                message="Generated the initial figure description.",
+            )
             data = await self.stylist_agent.process(data)
+            stylist_trace = data.get("_trace", {}).get("stylist", {})
+            await self._emit_text_stage(
+                data,
+                stage="stylist",
+                label="Stylist",
+                desc_key=f"target_{task_name}_stylist_desc0",
+                prompt=stylist_trace.get("prompt", ""),
+                message="Refined the description with style guidance.",
+            )
             data = await self.visualizer_agent.process(data)
+            await self._emit_visualizer_stage_events(data, task_name=task_name, include_stylist=True)
             # Use max_critic_rounds from data (if set) or config
             max_rounds = data.get("max_critic_rounds", self.exp_config.max_critic_rounds)
             data = await self._run_critic_iterations(data, task_name, max_rounds=max_rounds, source="stylist")
@@ -186,6 +427,15 @@ class PaperVizProcessor:
         needs_retrieval = exp_mode not in ("vanilla", "dev_polish", "dev_retriever")
 
         if needs_retrieval and data_list:
+            await self._emit_event(
+                {
+                    "type": "run_progress",
+                    "stage": "retriever_start",
+                    "label": "Retriever",
+                    "message": "Running shared retrieval before candidate generation.",
+                    "candidate_id": None,
+                }
+            )
             print("[Retriever] Running retrieval once for all candidates...")
             first_data = data_list[0]
             first_data = await self.retriever_agent.process(first_data, retrieval_setting=retrieval_setting)
@@ -195,6 +445,19 @@ class PaperVizProcessor:
                     if key in first_data:
                         data[key] = first_data[key]
             print(f"[Retriever] Done. Retrieved {len(first_data.get('top10_references', []))} references.")
+            retriever_trace = first_data.get("_trace", {}).get("retriever", {})
+            await self._emit_event(
+                {
+                    "type": "stage_complete",
+                    "stage": "retriever",
+                    "label": "Retriever",
+                    "message": f"Shared retrieval selected {len(first_data.get('top10_references', []))} references.",
+                    "candidate_id": None,
+                    "references": first_data.get("top10_references", []),
+                    "prompt": retriever_trace.get("prompt", ""),
+                },
+                first_data,
+            )
 
         semaphore = asyncio.Semaphore(max_concurrent)
         async def process_with_semaphore(doc):
@@ -237,6 +500,16 @@ class PaperVizProcessor:
 
                 pbar.set_postfix(postfix_dict)
                 pbar.update(1)
+                await self._emit_event(
+                    {
+                        "type": "candidate_complete",
+                        "candidate_id": result_data.get("candidate_id"),
+                        "stage": "candidate_complete",
+                        "label": "Candidate Complete",
+                        "message": f"Candidate {result_data.get('candidate_id')} finished processing.",
+                    },
+                    result_data,
+                )
                 yield result_data
 
     async def evaluation_function(

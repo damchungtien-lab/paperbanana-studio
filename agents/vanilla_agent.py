@@ -28,6 +28,11 @@ from utils import generation_utils, image_utils
 from .base_agent import BaseAgent
 
 
+def _resolve_figure_language(additional_info: Dict[str, Any]) -> str:
+    figure_language = str((additional_info or {}).get("figure_language", "en")).strip().lower()
+    return "zh" if figure_language in {"zh", "chinese", "中文"} else "en"
+
+
 def _execute_plot_code_worker(code_text: str) -> str:
     """
     Independent plot code execution worker:
@@ -108,10 +113,17 @@ class VanillaAgent(BaseAgent):
         raw_content = data["content"]
         content = json.dumps(raw_content) if isinstance(raw_content, (dict, list)) else raw_content
         visual_intent = data["visual_intent"]
+        additional_info = data.get("additional_info", {})
+        figure_language = _resolve_figure_language(additional_info)
         
         prompt_text = f"**{cfg['content_label']}**: {content}\n**{cfg['visual_intent_label']}**: {visual_intent}\n"
         if cfg['task_name'] == 'diagram':
-            prompt_text += "Note that do not include figure titles in the image."
+            language_text = "Chinese" if figure_language == "zh" else "English"
+            prompt_text += (
+                "Note that do not include figure titles in the image. "
+                f"All labels, annotations, and any text rendered inside the figure must be in {language_text}. "
+                "Do not mix languages."
+            )
         
         if cfg["use_image_generation"]:
             prompt_text += "**Generated Diagram**: "
@@ -119,6 +131,10 @@ class VanillaAgent(BaseAgent):
             prompt_text += "\nUse python matplotlib to generate a statistical plot based on the above information. Only provide the code without any explanations. Code:"
         
         content_list = [{"type": "text", "text": prompt_text}]
+        data.setdefault("_trace", {})["vanilla"] = {
+            "prompt": prompt_text,
+            "model_name": self.model_name,
+        }
         
         gen_config_args = {
             "system_instruction": self.system_prompt,
@@ -127,50 +143,29 @@ class VanillaAgent(BaseAgent):
             "max_output_tokens": 50000,
         }
         
-        aspect_ratio = data["additional_info"]["rounded_ratio"]
+        aspect_ratio = additional_info.get("rounded_ratio", "1:1")
+        image_size = generation_utils.normalize_generation_image_size(
+            additional_info.get("image_size", "1K")
+        )
 
         if cfg["use_image_generation"]:
-            if "gpt-image" in self.model_name:
-                image_config = {
-                    "size": "1536x1024",
-                    "quality": "high",
-                    "background": "opaque",
-                    "output_format": "png",
-                }
-                response_list = await generation_utils.call_openai_image_generation_with_retry_async(
-                    model_name=self.model_name,
-                    prompt=prompt_text[:30000],
-                    config=image_config,
-                    max_attempts=5,
-                    retry_delay=30,
-                )
-            elif generation_utils.openrouter_client is not None:
-                image_config = {
-                    "system_prompt": self.system_prompt,
-                    "temperature": self.exp_config.temperature,
-                    "aspect_ratio": aspect_ratio,
-                    "image_size": "1k",
-                }
-                response_list = await generation_utils.call_openrouter_image_generation_with_retry_async(
-                    model_name=self.model_name,
-                    contents=content_list,
-                    config=image_config,
-                    max_attempts=5,
-                    retry_delay=30,
-                )
-            else:
-                gen_config_args["response_modalities"] = ["IMAGE"]
-                gen_config_args["image_config"] = types.ImageConfig(
-                    aspect_ratio=aspect_ratio,
-                    image_size="1k",
-                )
-                response_list = await generation_utils.call_gemini_with_retry_async(
-                    model_name=self.model_name,
-                    contents=content_list,
-                    config=types.GenerateContentConfig(**gen_config_args),
-                    max_attempts=5,
-                    retry_delay=30,
-                )
+            image_config = {
+                "system_prompt": self.system_prompt,
+                "temperature": self.exp_config.temperature,
+                "aspect_ratio": aspect_ratio,
+                "image_size": image_size,
+                "quality": "high",
+                "background": "opaque",
+                "output_format": "png",
+            }
+            response_list = await generation_utils.call_image_model_with_retry_async(
+                model_name=self.model_name,
+                prompt=prompt_text[:30000],
+                contents=content_list,
+                config=image_config,
+                max_attempts=5,
+                retry_delay=30,
+            )
         else:
             # Code/text generation — use the unified router
             response_list = await generation_utils.call_model_with_retry_async(
@@ -212,6 +207,7 @@ The "Diagram Caption" is provided solely to describe the visual content and logi
 -   **Diagram Caption**: [Diagram caption]
 ## OUTPUT
 Generate a single, high-resolution image that visually explains the method and aligns well with the caption. 
+If the request specifies a target language for in-figure text, obey it strictly.
 """
 
 PLOT_VANILLA_AGENT_SYSTEM_PROMPT = """

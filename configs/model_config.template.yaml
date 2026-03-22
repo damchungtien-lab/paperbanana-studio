@@ -20,8 +20,25 @@ defaults:
   image_gen_model_name: "gemini-3.1-flash-image-preview"
   
 # API Keys. If you are using all gemini models, you can leave the other keys empty.
+# `custom_api_key` is for any OpenAI-compatible endpoint you host or proxy yourself.
 api_keys:
   google_api_key: "" # e.g. "xxxxxxxxxxxxx"
   openai_api_key: ""
   anthropic_api_key: ""
   openrouter_api_key: "" # e.g. "sk-or-v1-xxxxx". Set model_name to "openrouter/<model>" to use.
+  custom_api_key: "" # e.g. "sk-xxxxx". Used with api_base_urls.custom_base_url and model_name "custom/<model>".
+  custom_text_api_key: "" # Optional. Overrides custom_api_key for text models only.
+  custom_image_api_key: "" # Optional. Overrides custom_api_key for image models only.
+
+# Custom endpoints.
+# If your provider is OpenAI-compatible, set custom_base_url and then use
+# defaults like "custom/<model-name>" in the UI or config.
+api_base_urls:
+  custom_base_url: "" # e.g. "https://api.example.com/v1"
+  custom_text_base_url: "" # Optional. Overrides custom_base_url for text models only.
+  custom_image_base_url: "" # Optional. Overrides custom_base_url for image models only.
+
+# Optional Google Cloud Vertex AI fallback for Gemini.
+google_cloud:
+  project_id: ""
+  location: "global"

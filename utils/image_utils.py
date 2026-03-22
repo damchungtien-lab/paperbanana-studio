@@ -20,6 +20,10 @@ import base64
 import io
 from PIL import Image
 
+from utils.console_utils import setup_console
+
+setup_console()
+
 
 def convert_png_b64_to_jpg_b64(png_b64_str: str) -> str:
     """
@@ -33,7 +37,7 @@ def convert_png_b64_to_jpg_b64(png_b64_str: str) -> str:
     """
     try:
         if not png_b64_str or len(png_b64_str) < 10:
-            print(f"⚠️  Invalid base64 string (too short): {png_b64_str[:50] if png_b64_str else 'None'}")
+            print(f"Warning: Invalid base64 string (too short): {png_b64_str[:50] if png_b64_str else 'None'}")
             return None
             
         img = Image.open(io.BytesIO(base64.b64decode(png_b64_str))).convert("RGB")
@@ -41,6 +45,6 @@ def convert_png_b64_to_jpg_b64(png_b64_str: str) -> str:
         img.save(out_io, format="JPEG", quality=95)
         return base64.b64encode(out_io.getvalue()).decode("utf-8")
     except Exception as e:
-        print(f"❌ Error converting image: {e}")
+        print(f"Error converting image: {e}")
         print(f"   Input preview: {png_b64_str[:100] if png_b64_str else 'None'}")
         return None
