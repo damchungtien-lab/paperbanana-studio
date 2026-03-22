@@ -121,9 +121,7 @@ copy configs\model_config.template.yaml configs\model_config.yaml
 
 然后编辑 `configs/model_config.yaml`。
 
-注意：
-- `configs/model_config.yaml` 是本地私有文件，不应提交到 Git。
-- 模板文件 `configs/model_config.template.yaml` 不包含你的真实密钥。
+
 
 #### 4. 启动
 
@@ -158,7 +156,6 @@ dist/PaperBanana.exe
 ```
 
 便携版的设计原则：
-- EXE 内置的是脱敏模板配置，不会打包你的真实 API 信息。
 - 首次启动会把运行文件解包到当前用户本机目录。
 - 服务就绪后会自动打开浏览器。
 
