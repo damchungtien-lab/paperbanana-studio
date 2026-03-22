@@ -2,6 +2,10 @@
 
 面向大众、可视化、可自定义 API 的学术插图生成工作台。
 
+> Fork Notice
+>
+> This repository is an independent, community-enhanced derivative of [dwzhu-pku/PaperBanana](https://github.com/dwzhu-pku/PaperBanana), which itself builds on Google's [PaperVizAgent](https://github.com/google-research/papervizagent). This project is not the official upstream release. It is a downstream enhancement focused on usability, custom API integration, UI experience, local deployment, and public accessibility.
+
 本项目基于原始开源项目 [dwzhu-pku/PaperBanana](https://github.com/dwzhu-pku/PaperBanana) 演进而来，而上游又与 Google Research 的 [PaperVizAgent](https://github.com/google-research/papervizagent) 一脉相承。这个版本的目标不是只做论文复现，而是把它真正打磨成一个普通用户也能直接上手的本地 Web 应用。
 
 ![PaperBanana Examples](assets/teaser_figure.jpg)
@@ -298,6 +302,8 @@ data/PaperBananaBench/
 
 - [dwzhu-pku/PaperBanana](https://github.com/dwzhu-pku/PaperBanana)
 - [google-research/papervizagent](https://github.com/google-research/papervizagent)
+
+请在任何再分发、介绍、截图展示或二次修改中，明确说明本项目来自上述上游开源仓库，并在此基础上做了增强和工程化改造。
 
 ## 开源说明
 
